@@ -13,7 +13,7 @@ from sphinx.environment import BuildEnvironment
 from sphinx.ext.autodoc import Options
 from sphinx.ext.autodoc.mock import mock
 from sphinx.util import logging
-from sphinx.util.inspect import signature as sphinx_signature
+from sphinx.util.inspect import signature as sphinx_signature, TypeAliasNamespace, TypeAliasForwardRef
 from sphinx.util.inspect import stringify_signature
 
 from .version import __version__
@@ -127,6 +127,9 @@ def format_annotation(annotation: Any, config: Config) -> str:  # noqa: C901 # t
 
     if isinstance(annotation, tuple):
         return format_internal_tuple(annotation, config)
+
+    if isinstance(annotation, TypeAliasForwardRef):
+        annotation = annotation.name
 
     try:
         module = get_annotation_module(annotation)
@@ -253,7 +256,7 @@ def process_signature(
         return None
 
     obj = inspect.unwrap(obj)
-    sph_signature = sphinx_signature(obj)
+    sph_signature = sphinx_signature(obj, type_aliases=app.config.autodoc_type_aliases)
     parameters = [param.replace(annotation=inspect.Parameter.empty) for param in sph_signature.parameters.values()]
 
     # if we have parameters we may need to delete first argument that's not documented, e.g. self
@@ -299,8 +302,9 @@ def _future_annotations_imported(obj: Any) -> bool:
     return bool(_annotations.compiler_flag == future_annotations)
 
 
-def get_all_type_hints(autodoc_mock_imports: list[str], obj: Any, name: str) -> dict[str, Any]:
-    result = _get_type_hint(autodoc_mock_imports, name, obj)
+def get_all_type_hints(autodoc_mock_imports: list[str], obj: Any, name: str,
+                       type_aliases: dict[str, Any]) -> dict[str, Any]:
+    result = _get_type_hint(autodoc_mock_imports, name, obj, type_aliases)
     if not result:
         result = backfill_type_hints(obj, name)
         try:
@@ -308,7 +312,7 @@ def get_all_type_hints(autodoc_mock_imports: list[str], obj: Any, name: str) -> 
         except (AttributeError, TypeError):
             pass
         else:
-            result = _get_type_hint(autodoc_mock_imports, name, obj)
+            result = _get_type_hint(autodoc_mock_imports, name, obj, type_aliases)
     return result
 
 
@@ -336,10 +340,12 @@ def _resolve_type_guarded_imports(autodoc_mock_imports: list[str], obj: Any) -> 
                             _LOGGER.warning(f"Failed guarded type import with {exc!r}")
 
 
-def _get_type_hint(autodoc_mock_imports: list[str], name: str, obj: Any) -> dict[str, Any]:
+def _get_type_hint(autodoc_mock_imports: list[str], name: str, obj: Any,
+                   type_aliases: dict[str, Any]) -> dict[str, Any]:
     _resolve_type_guarded_imports(autodoc_mock_imports, obj)
     try:
-        result = get_type_hints(obj)
+        localns = TypeAliasNamespace(type_aliases)
+        result = get_type_hints(obj, None, localns)
     except (AttributeError, TypeError, RecursionError) as exc:
         # TypeError - slot wrapper, PEP-563 when part of new syntax not supported
         # RecursionError - some recursive type definitions https://github.com/python/typing/issues/574
@@ -492,7 +498,8 @@ def process_docstring(
         signature = sphinx_signature(obj)
     except (ValueError, TypeError):
         signature = None
-    type_hints = get_all_type_hints(app.config.autodoc_mock_imports, obj, name)
+    type_hints = get_all_type_hints(app.config.autodoc_mock_imports, obj, name,
+                                    app.config.autodoc_type_aliases)
     app.config._annotation_globals = getattr(obj, "__globals__", {})  # type: ignore # config has no such attribute
     try:
         _inject_types_to_docstring(type_hints, signature, original_obj, app, what, name, lines)
